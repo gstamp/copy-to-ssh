@@ -2,7 +2,7 @@
 
 A small **Windows** system tray application that uploads whatever is on the **clipboard** to a remote host over **SSH (SFTP)**, then replaces the clipboard with the **remote file path** so you can paste it elsewhere.
 
-Written in [Zig](https://ziglang.org/) with the Win32 API (no console window).
+Written in [Zig](https://ziglang.org/) with the Win32 API. Failrly dinky and mostly just built for my particular needs.
 
 ## What it does
 

@@ -5,6 +5,26 @@ const win = @import("win32.zig");
 
 const log = std.log.scoped(.tray);
 
+pub const TrayClickAction = enum {
+    show_menu,
+    ignore,
+};
+
+pub fn actionForTrayMouseMessage(message: u32) TrayClickAction {
+    return switch (message) {
+        0x0202, 0x0205 => .show_menu,
+        else => .ignore,
+    };
+}
+
+test "left mouse button release requests the tray menu" {
+    try std.testing.expectEqual(TrayClickAction.show_menu, actionForTrayMouseMessage(0x0202));
+}
+
+test "right mouse button release requests the tray menu" {
+    try std.testing.expectEqual(TrayClickAction.show_menu, actionForTrayMouseMessage(0x0205));
+}
+
 /// Setup the tray icon
 pub fn setup(hwnd: win.HWND, hicon: win.HICON) bool {
     var nid = createNotifyIconData(hwnd, hicon, getDefaultTooltip());
@@ -79,6 +99,7 @@ pub fn cleanup(hwnd: win.HWND, hicon: win.HICON) void {
     log.info("Tray icon removed", .{});
 }
 
+pub const IDM_COPY = 1001;
 pub const IDM_AUTO_MODE = 1004;
 
 /// Show the tray context menu
@@ -86,6 +107,8 @@ pub fn showContextMenu(hwnd: win.HWND, auto_mode: bool) void {
     const hmenu = win.CreatePopupMenu() orelse return;
     defer _ = win.DestroyMenu(hmenu);
 
+    _ = win.AppendMenuW(hmenu, win.MF_STRING, @as(win.UINT_PTR, @intCast(IDM_COPY)), &[_:0]u16{ '&', 'C', 'o', 'p', 'y', ' ', 't', 'o', ' ', 'r', 'e', 'm', 'o', 't', 'e' });
+    _ = win.AppendMenuW(hmenu, win.MF_SEPARATOR, 0, null);
     const auto_flags = win.MF_STRING | if (auto_mode) win.MF_CHECKED else win.MF_UNCHECKED;
     _ = win.AppendMenuW(hmenu, auto_flags, @as(win.UINT_PTR, @intCast(IDM_AUTO_MODE)), &[_:0]u16{ 'A', 'u', 't', 'o', ' ', 'M', 'o', 'd', 'e' });
     _ = win.AppendMenuW(hmenu, win.MF_SEPARATOR, 0, null);

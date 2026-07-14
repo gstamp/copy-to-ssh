@@ -73,9 +73,8 @@ remote_path=/tmp/sync-to-remote/
 
 | Action | Effect |
 |--------|--------|
-| **Ctrl+Alt+Insert** | Upload current clipboard (if it contains a supported type). |
-| **Tray — left click** | Same as the hotkey. |
-| **Tray — right click** | Context menu: Settings, Exit. |
+| **Win+Alt+V** | Upload current clipboard (if it contains a supported type). |
+| **Tray — left or right click** | Menu: Copy to remote, Auto Mode, Settings, Exit. |
 
 **Clipboard support:**
 
@@ -84,5 +83,7 @@ remote_path=/tmp/sync-to-remote/
 - **Text** — uploaded as a `.txt` file with a timestamped name.
 
 If nothing supported is in the clipboard, or the host is not configured, the app shows a tray notification.
+
+During a remote upload, a notification-style progress window remains visible in the lower-right corner. Its animated progress sweep continues until the upload finishes and the remote reference has been copied to the clipboard.
 
 Only **one instance** runs at a time; starting again focuses the existing hidden window.

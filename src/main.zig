@@ -12,6 +12,7 @@ const hotkey = @import("hotkey.zig");
 const clipboard = @import("clipboard.zig");
 const sftp = @import("sftp.zig");
 const gui = @import("gui.zig");
+const progress = @import("progress.zig");
 
 const log = std.log.scoped(.main);
 const CLASS_NAME: [*:0]const u16 = &[_:0]u16{ 'S', 'y', 'n', 'c', 'T', 'o', 'R', 'e', 'm', 'o', 't', 'e', 'W', 'n', 'd' };
@@ -21,6 +22,20 @@ const APP_NAME: [*:0]const u16 = &[_:0]u16{ 's', 'y', 'n', 'c', '-', 't', 'o', '
 var g_allocator: std.mem.Allocator = undefined;
 var g_hicon: win.HICON = undefined;
 var g_auto_mode: bool = false;
+const WM_UPLOAD_COMPLETE = win.WM_USER + 101;
+
+const UploadOutcome = enum { pending, success, failure };
+
+const UploadJob = struct {
+    owner: win.HWND,
+    progress_window: win.HWND,
+    cfg: config.Config,
+    info: clipboard.ClipboardInfo,
+    outcome: UploadOutcome = .pending,
+    error_text: [256]u16 = [_]u16{0} ** 256,
+};
+
+extern "user32" fn PostMessageW(hWnd: win.HWND, Msg: win.UINT, wParam: win.WPARAM, lParam: win.LPARAM) callconv(.winapi) win.BOOL;
 
 pub fn main() !void {
     // Set up allocator
@@ -50,6 +65,7 @@ pub fn main() !void {
 
     // Register window class
     const hinst = win.GetModuleHandleW(null) orelse return;
+    progress.init(hinst);
 
     const wc = win.WNDCLASSW{
         .style = 0,
@@ -75,7 +91,10 @@ pub fn main() !void {
         CLASS_NAME,
         APP_NAME,
         0,
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
         null,
         null,
         hinst,
@@ -142,18 +161,19 @@ fn wndProc(hwnd: win.HWND, msg: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM
         },
         win.WM_TRAYICON => {
             const lparam_low = @as(u32, @intCast(lparam & 0xFFFF));
-            if (lparam_low == 0x0202) { // WM_LBUTTONUP
-                // Left click - upload current clipboard
-                onHotkey(hwnd);
-            } else if (lparam_low == 0x0205) { // WM_RBUTTONUP
-                // Right click - show context menu
-                tray.showContextMenu(hwnd, g_auto_mode);
+            switch (tray.actionForTrayMouseMessage(lparam_low)) {
+                .show_menu => tray.showContextMenu(hwnd, g_auto_mode),
+                .ignore => {},
             }
             return 0;
         },
         win.WM_COMMAND => {
             const id = @as(i32, @intCast(wparam & 0xFFFF));
             switch (id) {
+                tray.IDM_COPY => {
+                    onHotkey(hwnd);
+                    return 0;
+                },
                 win.IDM_EXIT => {
                     _ = win.DestroyWindow(hwnd);
                     return 0;
@@ -173,6 +193,11 @@ fn wndProc(hwnd: win.HWND, msg: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM
         },
         win.WM_USER + 100 => {
             // Dummy message for tray menu cleanup
+            return 0;
+        },
+        WM_UPLOAD_COMPLETE => {
+            const job: *UploadJob = @ptrFromInt(@as(usize, @intCast(lparam)));
+            finishUpload(job);
             return 0;
         },
         else => {},
@@ -218,8 +243,6 @@ fn onHotkey(hwnd: win.HWND) void {
                 return;
             }
 
-            _ = tray.showNotification(hwnd, g_hicon, &win.w("sync-to-remote"), &win.w("Uploading..."), win.NIIF_INFO);
-
             if (cfg.local_enabled) {
                 const local_res = saveLocally(hwnd, &cfg, &info) catch |err| {
                     const errMsg = std.fmt.allocPrint(g_allocator, "Local save failed: {}", .{err}) catch unreachable;
@@ -242,101 +265,98 @@ fn onHotkey(hwnd: win.HWND) void {
                 return;
             }
 
-            // Upload via SFTP
-            const result = sftp.upload(
-                g_allocator,
-                @as([*:0]const u16, @ptrCast(&cfg.host)),
-                cfg.port,
-                @as([*:0]const u16, @ptrCast(&cfg.username)),
-                @as([*:0]const u16, @ptrCast(&cfg.remote_path)),
-                @as([*:0]const u16, @ptrCast(&info.local_path)),
-                @as([*:0]const u16, @ptrCast(&info.remote_filename)),
-            ) catch |err| {
-                const errMsg = std.fmt.allocPrint(g_allocator, "Upload failed: {}", .{err}) catch unreachable;
-                defer g_allocator.free(errMsg);
-                var errWide: [256]u16 = undefined;
-                @memset(&errWide, 0);
-                utf8To16(errMsg, &errWide);
-                _ = tray.showNotification(hwnd, g_hicon, &win.w("Upload Failed"), @as([*:0]const u16, @ptrCast(&errWide)), win.NIIF_ERROR);
-                // Cleanup temp file for images/text
-                if (info.content_type != .file) {
-                    _ = win.DeleteFileW(@as([*:0]const u16, @ptrCast(&info.local_path)));
-                }
-                return;
-            };
-
-            switch (result) {
-                .success => {
-                    // Build the remote path reference for clipboard: "@<remote_path>/<filename>"
-                    var remote_ref: [1024]u16 = undefined;
-                    @memset(&remote_ref, 0);
-                    var ri: usize = 0;
-
-                    // Copy remote_path
-                    var i: usize = 0;
-                    while (cfg.remote_path[i] != 0 and i < 500 and ri < 1020) : (i += 1) {
-                        remote_ref[ri] = cfg.remote_path[i];
-                        ri += 1;
-                    }
-                    // Ensure trailing /
-                    if (ri > 0 and remote_ref[ri - 1] != '/') {
-                        remote_ref[ri] = '/';
-                        ri += 1;
-                    }
-                    // Append remote filename (no @ prefix — added to clipboard reference below)
-                    i = 0;
-                    while (info.remote_filename[i] != 0 and i < 250 and ri < 1020) : (i += 1) {
-                        remote_ref[ri] = info.remote_filename[i];
-                        ri += 1;
-                    }
-                    remote_ref[ri] = 0;
-
-                    // Set clipboard to "@<remote path>" (single leading '@').
-                    var clip_ref: [1026]u16 = undefined;
-                    @memset(&clip_ref, 0);
-                    clip_ref[0] = '@';
-                    var ci: usize = 0;
-                    while (remote_ref[ci] != 0 and ci + 1 < clip_ref.len - 1) : (ci += 1) {
-                        clip_ref[ci + 1] = remote_ref[ci];
-                    }
-                    clip_ref[ci + 1] = 0;
-                    setClipboardText(hwnd, @as([*:0]const u16, @ptrCast(&clip_ref)));
-
-                    // Show success notification
-                    var success_msg: [512]u16 = undefined;
-                    @memset(&success_msg, 0);
-                    const prefix = "Copied to: \x00";
-                    var si: usize = 0;
-                    while (prefix[si] != 0 and si < 500) : (si += 1) {
-                        success_msg[si] = prefix[si];
-                    }
-                    var ri2: usize = 0;
-                    while (remote_ref[ri2] != 0 and si < 510) : ({
-                        si += 1;
-                        ri2 += 1;
-                    }) {
-                        success_msg[si] = remote_ref[ri2];
-                    }
-                    success_msg[si] = 0;
-
-                    _ = tray.showNotification(hwnd, g_hicon, &win.w("Upload Successful"), @as([*:0]const u16, @ptrCast(&success_msg)), win.NIIF_INFO);
-                },
-                .err => |errMsg| {
-                    const errManaged = g_allocator.dupe(u8, errMsg) catch unreachable;
-                    defer g_allocator.free(errManaged);
-                    var errWide: [256]u16 = undefined;
-                    @memset(&errWide, 0);
-                    utf8To16(errManaged, &errWide);
-                    _ = tray.showNotification(hwnd, g_hicon, &win.w("Upload Failed"), @as([*:0]const u16, @ptrCast(&errWide)), win.NIIF_ERROR);
-                },
-            }
-
-            // Cleanup temp file if we created it (not for native files)
-            if (info.content_type != .file) {
-                _ = win.DeleteFileW(@as([*:0]const u16, @ptrCast(&info.local_path)));
-            }
+            startUpload(hwnd, cfg, info);
         },
     }
+}
+
+fn startUpload(hwnd: win.HWND, cfg: config.Config, info: clipboard.ClipboardInfo) void {
+    const progress_window = progress.show(g_allocator, &win.w("Uploading to server...")) catch {
+        _ = tray.showNotification(hwnd, g_hicon, &win.w("Error"), &win.w("Failed to open upload progress"), win.NIIF_ERROR);
+        if (info.content_type != .file) {
+            _ = win.DeleteFileW(@as([*:0]const u16, @ptrCast(&info.local_path)));
+        }
+        return;
+    };
+
+    const job = g_allocator.create(UploadJob) catch {
+        progress.completeFailure(progress_window, &win.w("Could not start upload"));
+        if (info.content_type != .file) {
+            _ = win.DeleteFileW(@as([*:0]const u16, @ptrCast(&info.local_path)));
+        }
+        return;
+    };
+    job.* = .{ .owner = hwnd, .progress_window = progress_window, .cfg = cfg, .info = info };
+    progress.attachJob(progress_window, job, destroyUploadJob);
+
+    const thread = std.Thread.spawn(.{}, uploadWorker, .{job}) catch {
+        progress.completeFailure(progress_window, &win.w("Could not start upload"));
+        return;
+    };
+    thread.detach();
+}
+
+fn uploadWorker(job: *UploadJob) void {
+    const result = sftp.upload(
+        g_allocator,
+        @as([*:0]const u16, @ptrCast(&job.cfg.host)),
+        job.cfg.port,
+        @as([*:0]const u16, @ptrCast(&job.cfg.username)),
+        @as([*:0]const u16, @ptrCast(&job.cfg.remote_path)),
+        @as([*:0]const u16, @ptrCast(&job.info.local_path)),
+        @as([*:0]const u16, @ptrCast(&job.info.remote_filename)),
+    ) catch |err| {
+        var buffer: [128]u8 = undefined;
+        const message = std.fmt.bufPrint(&buffer, "Upload failed: {}", .{err}) catch "Upload failed";
+        utf8To16(message, &job.error_text);
+        job.outcome = .failure;
+        _ = PostMessageW(job.owner, WM_UPLOAD_COMPLETE, 0, @as(win.LPARAM, @intCast(@intFromPtr(job))));
+        return;
+    };
+
+    switch (result) {
+        .success => job.outcome = .success,
+        .err => |message| {
+            utf8To16(message, &job.error_text);
+            job.outcome = .failure;
+        },
+    }
+    _ = PostMessageW(job.owner, WM_UPLOAD_COMPLETE, 0, @as(win.LPARAM, @intCast(@intFromPtr(job))));
+}
+
+fn finishUpload(job: *UploadJob) void {
+    if (job.outcome == .failure) {
+        progress.completeFailure(job.progress_window, @as([*:0]const u16, @ptrCast(&job.error_text)));
+        return;
+    }
+
+    var clip_ref: [1026]u16 = [_]u16{0} ** 1026;
+    clip_ref[0] = '@';
+    var ci: usize = 1;
+    var i: usize = 0;
+    while (job.cfg.remote_path[i] != 0 and ci < clip_ref.len - 1) : (i += 1) {
+        clip_ref[ci] = job.cfg.remote_path[i];
+        ci += 1;
+    }
+    if (ci > 1 and clip_ref[ci - 1] != '/') {
+        clip_ref[ci] = '/';
+        ci += 1;
+    }
+    i = 0;
+    while (job.info.remote_filename[i] != 0 and ci < clip_ref.len - 1) : (i += 1) {
+        clip_ref[ci] = job.info.remote_filename[i];
+        ci += 1;
+    }
+    setClipboardText(job.owner, @as([*:0]const u16, @ptrCast(&clip_ref)));
+    progress.completeSuccess(job.progress_window);
+}
+
+fn destroyUploadJob(raw_job: *anyopaque, allocator: std.mem.Allocator) void {
+    const job: *UploadJob = @ptrCast(@alignCast(raw_job));
+    if (job.info.content_type != .file) {
+        _ = win.DeleteFileW(@as([*:0]const u16, @ptrCast(&job.info.local_path)));
+    }
+    allocator.destroy(job);
 }
 
 fn saveLocally(hwnd: win.HWND, cfg: *const config.Config, info: *const clipboard.ClipboardInfo) !bool {
@@ -426,10 +446,8 @@ fn onSettings(hwnd: win.HWND) void {
 fn updateAutoModeTray(hwnd: win.HWND) void {
     if (g_auto_mode) {
         _ = tray.updateTooltip(hwnd, g_hicon, &[_:0]u16{ 's', 'y', 'n', 'c', '-', 't', 'o', '-', 'r', 'e', 'm', 'o', 't', 'e', ' ', '[', 'A', 'u', 't', 'o', ' ', 'M', 'o', 'd', 'e', ']' });
-        _ = tray.showNotification(hwnd, g_hicon, &win.w("Auto Mode"), &win.w("Auto Mode Enabled — images copied to clipboard will be uploaded automatically"), win.NIIF_INFO);
     } else {
         _ = tray.updateTooltip(hwnd, g_hicon, &[_:0]u16{ 's', 'y', 'n', 'c', '-', 't', 'o', '-', 'r', 'e', 'm', 'o', 't', 'e' });
-        _ = tray.showNotification(hwnd, g_hicon, &win.w("Auto Mode"), &win.w("Auto Mode Disabled"), win.NIIF_INFO);
     }
 }
 
@@ -452,7 +470,7 @@ fn setClipboardText(hwnd: win.HWND, text: [*:0]const u16) void {
     };
 
     // Copy string
-    @memcpy(@as([*]u16, @alignCast(@ptrCast(ptr)))[0 .. len + 1], text[0 .. len + 1]);
+    @memcpy(@as([*]u16, @ptrCast(@alignCast(ptr)))[0 .. len + 1], text[0 .. len + 1]);
 
     _ = win.GlobalUnlock(hmem);
     _ = win.SetClipboardData(win.CF_UNICODETEXT, hmem);
@@ -508,7 +526,8 @@ fn loadIcon() ?win.HICON {
         null,
         @as([*:0]const u16, @ptrCast(&wszTempFile)),
         win.IMAGE_ICON,
-        32, 32,
+        32,
+        32,
         win.LR_LOADFROMFILE,
     );
 

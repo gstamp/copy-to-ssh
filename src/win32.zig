@@ -46,7 +46,10 @@ pub const WM_CREATE = 0x0001;
 pub const WM_DESTROY = 0x0002;
 pub const WM_CLOSE = 0x0010;
 pub const WM_QUIT = 0x0012;
+pub const WM_NCDESTROY = 0x0082;
+pub const WM_PAINT = 0x000F;
 pub const WM_COMMAND = 0x0111;
+pub const WM_TIMER = 0x0113;
 pub const WM_HOTKEY = 0x0312;
 pub const WM_TRAYICON = WM_USER + 1;
 pub const WM_USER = 0x0400;
@@ -128,6 +131,7 @@ pub const WS_CHILD: DWORD = 0x40000000;
 pub const WS_BORDER: DWORD = 0x00800000;
 pub const WS_OVERLAPPED: DWORD = 0x00000000;
 pub const WS_TABSTOP: DWORD = 0x00010000;
+pub const WS_DISABLED: DWORD = 0x08000000;
 
 // Button styles (winuser.h)
 pub const BS_PUSHBUTTON: DWORD = 0x00000000;
@@ -159,6 +163,36 @@ pub const WS_THICKFRAME: DWORD = 0x00040000;
 // Standard control IDs
 pub const IDOK: i32 = 1;
 pub const IDCANCEL: i32 = 2;
+
+// Progress bar (msctls_progress32)
+pub const PBS_MARQUEE: DWORD = 0x08;
+pub const PBM_SETMARQUEE: UINT = WM_USER + 10;
+pub const PBM_SETSTATE: UINT = WM_USER + 16;
+pub const PBST_NORMAL: i32 = 0x0001;
+pub const PBST_ERROR: i32 = 0x0002;
+
+// Timers
+pub extern "user32" fn SetTimer(
+    hWnd: ?HWND,
+    nIDEvent: usize,
+    uElapse: UINT,
+    lpTimerFunc: ?*anyopaque,
+) callconv(.winapi) usize;
+pub extern "user32" fn KillTimer(hWnd: ?HWND, nIDEvent: usize) callconv(.winapi) BOOL;
+
+// System metrics
+pub const SM_CXSCREEN: i32 = 0;
+pub const SM_CYSCREEN: i32 = 1;
+pub extern "user32" fn GetSystemMetrics(nIndex: i32) callconv(.winapi) i32;
+
+// Static control styles
+pub const SS_LEFT: DWORD = 0x00000000;
+pub const SS_LEFTNOWORDWRAP: DWORD = 0x0000000C;
+
+// Our custom control IDs for progress window
+pub const IDC_PROGRESS_STATUS: i32 = 3001;
+pub const IDC_PROGRESS_BAR: i32 = 3002;
+pub const IDC_PROGRESS_CLOSE: i32 = 3003;
 
 // Our custom control IDs for settings dialog
 pub const IDC_HOST = 2001;
@@ -616,7 +650,7 @@ pub extern "user32" fn AddClipboardFormatListener(hwnd: HWND) callconv(.winapi) 
 pub extern "user32" fn RemoveClipboardFormatListener(hwnd: HWND) callconv(.winapi) BOOL;
 
 pub extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: LPCWSTR) callconv(.winapi) HCURSOR;
-pub const IDC_ARROW: [*:0]const u16 = @ptrCast(&[_:0]u16{ 0x7F00 }); // IDC_ARROW = MAKEINTRESOURCE(32512) = (HCURSOR)32512
+pub const IDC_ARROW: [*:0]const u16 = @ptrCast(&[_:0]u16{0x7F00}); // IDC_ARROW = MAKEINTRESOURCE(32512) = (HCURSOR)32512
 
 // Icon
 pub extern "user32" fn CreateIconFromResourceEx(
